@@ -1,0 +1,11 @@
+services:
+  - type: cron
+    name: carwash-scout-agent
+    env: python
+    # Runs every day at 8 AM Eastern (12:00 UTC)
+    schedule: "0 12 * * *"
+    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
+    startCommand: python main.py
+    envVars:
+      - key: SITE_URL
+        sync: false
