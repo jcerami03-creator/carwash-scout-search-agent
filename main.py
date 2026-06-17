@@ -155,6 +155,12 @@ def listing_url(listing_id: str) -> str:
     return f"https://www.bizbuysell.com/listings/Profile/?q={listing_id}"
 
 
+def maps_url(location: str) -> str:
+    if not location:
+        return ""
+    return "https://www.google.com/maps/search/" + requests.utils.quote(location)
+
+
 def dedup_key_for(listing: dict) -> str:
     """Prefer the stable listing id; fall back to name|state."""
     lid = extract_listing_id(listing.get("research_url", ""))
@@ -344,7 +350,14 @@ def parse_listings(html: str, today: str) -> list:
         location = locations.get(lid, "") or extract_location(seg)
         location = re.sub(r"\s*\([^)]*\).*$", "", location).strip().rstrip(":").strip()
         state = parse_state(location)
-        note = (seg[:700].strip() + f"\n\nAuto-imported from BizBuySell email alert on {today}").strip()
+        if not state:
+            # Digest emails label each listing's state as "Location: XX"
+            m = re.search(r"Location:\s*([A-Z]{2})\b", seg)
+            if m:
+                state = m.group(1)
+        # Trim trailing franchise ads / boilerplate from the note text
+        summary = re.split(r"Location:\s*[A-Z]{2}\b|The following franchises", seg)[0].strip()
+        note = ((summary or name)[:600].strip() + f"\n\nAuto-imported from BizBuySell email alert on {today}").strip()
         listings.append({
             "name": name,
             "market": location,
@@ -352,6 +365,7 @@ def parse_listings(html: str, today: str) -> list:
             "asking_price": extract_price(seg),
             "phone": extract_phone(seg),
             "research_url": listing_url(lid),
+            "maps_url": maps_url(location) if location else "",
             "source": "BizBuySell Email Alert",
             "note": note,
         })
