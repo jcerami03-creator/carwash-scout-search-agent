@@ -7,7 +7,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
 
     steps:
       - name: Check out code
@@ -22,7 +22,10 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Install Chromium browser
-        run: playwright install --with-deps chromium
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64
+          playwright install chromium
 
       - name: Run scraper
         env:
