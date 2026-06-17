@@ -25,6 +25,7 @@ log = logging.getLogger(__name__)
 
 SITE_URL = os.environ["SITE_URL"].rstrip("/")
 API_URL = f"{SITE_URL}/api/manual-records"
+AUTH = (os.environ.get("SCOUT_USER", "shullman"), os.environ.get("SCOUT_PASS", ""))
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +37,7 @@ def get_existing_keys() -> set:
     for attempt in range(1, 4):
         try:
             log.info(f"Fetching existing listings (attempt {attempt})...")
-            resp = requests.get(API_URL, timeout=90)
+            resp = requests.get(API_URL, auth=AUTH, timeout=90)
             resp.raise_for_status()
             records = resp.json()
             if isinstance(records, dict):
@@ -61,7 +62,7 @@ def get_existing_keys() -> set:
 
 
 def add_listing(listing: dict) -> dict:
-    resp = requests.post(API_URL, json=listing, timeout=30)
+    resp = requests.post(API_URL, json=listing, auth=AUTH, timeout=30)
     resp.raise_for_status()
     return resp.json()
 
