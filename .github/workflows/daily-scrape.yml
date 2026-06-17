@@ -1,35 +1,27 @@
-name: Daily Car Wash Scrape
+name: Daily Car Wash Email Check
 
 on:
   schedule:
-    - cron: "0 12 * * *"
+    - cron: "0 0 * * *"
   workflow_dispatch:
 
 jobs:
-  scrape:
+  scan:
     runs-on: ubuntu-latest
-
     steps:
       - name: Check out code
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: Install dependencies
         run: pip install -r requirements.txt
-
-      - name: Install Chromium browser
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libasound2t64
-          playwright install chromium
-
-      - name: Run scraper
+      - name: Run email scanner
         env:
           SITE_URL: ${{ secrets.SITE_URL }}
           SCOUT_USER: ${{ secrets.SCOUT_USER }}
           SCOUT_PASS: ${{ secrets.SCOUT_PASS }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
         run: python main.py
