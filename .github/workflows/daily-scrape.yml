@@ -1,11 +1,35 @@
-services:
-  - type: cron
-    name: carwash-scout-agent
-    env: python
-    # Runs every day at 8 AM Eastern (12:00 UTC)
-    schedule: "0 12 * * *"
-    buildCommand: pip install -r requirements.txt && playwright install chromium --with-deps
-    startCommand: python main.py
-    envVars:
-      - key: SITE_URL
-        sync: false
+name: Daily Car Wash Scrape
+
+on:
+  schedule:
+    - cron: "0 12 * * *"
+  workflow_dispatch:
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install Chromium browser
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libasound2t64
+          playwright install chromium
+
+      - name: Run scraper
+        env:
+          SITE_URL: ${{ secrets.SITE_URL }}
+          SCOUT_USER: ${{ secrets.SCOUT_USER }}
+          SCOUT_PASS: ${{ secrets.SCOUT_PASS }}
+        run: python main.py
