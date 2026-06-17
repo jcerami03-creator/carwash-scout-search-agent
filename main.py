@@ -11,6 +11,7 @@ reads the emails BizBuySell sends you and files them onto your site.
 
 import os
 import re
+import time
 import email
 import imaplib
 import logging
@@ -42,6 +43,13 @@ BIZBUYSELL_FROM = os.environ.get("BIZBUYSELL_FROM", "bizbuysell")
 # How many days of emails to scan each run (2 = small overlap so nothing slips)
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 
+# Subjects that are account/welcome emails, NOT listing alerts — skip these
+SKIP_SUBJECTS = (
+    "thank you", "registering", "register", "welcome", "verify", "confirm your",
+    "password", "receipt", "reset your", "your account", "saved search created",
+    "saved your search",
+)
+
 # Anchor text that is navigation, not a business listing
 NAV_WORDS = {
     "unsubscribe", "view all", "see all", "manage", "bizbuysell", "privacy",
@@ -59,7 +67,6 @@ NAV_WORDS = {
 
 def get_existing_keys() -> set:
     """Return name|state dedup keys for every listing already on the site."""
-    import time
     for attempt in range(1, 4):
         try:
             log.info(f"Fetching existing site listings (attempt {attempt})...")
@@ -81,9 +88,20 @@ def get_existing_keys() -> set:
 
 
 def add_listing(listing: dict) -> dict:
-    resp = requests.post(API_URL, json=listing, auth=AUTH, timeout=30)
-    resp.raise_for_status()
-    return resp.json()
+    # Render free tier can throw transient 502s — retry on server errors
+    for attempt in range(1, 4):
+        try:
+            resp = requests.post(API_URL, json=listing, auth=AUTH, timeout=45)
+            if resp.status_code >= 500:
+                raise requests.HTTPError(f"{resp.status_code} server error (site waking up)")
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as e:
+            if attempt < 3:
+                log.warning(f"  POST attempt {attempt} failed ({e}); retrying in 20s...")
+                time.sleep(20)
+            else:
+                raise
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +118,20 @@ def listing_key(name: str, state: str) -> str:
 def parse_state(location: str) -> str:
     m = re.search(r",\s*([A-Z]{2})\b", location or "")
     return m.group(1) if m else ""
+
+
+def is_listing_url(href: str) -> bool:
+    """True only for real BizBuySell listing pages, not nav/footer links."""
+    h = href.lower()
+    if "bizbuysell" not in h:
+        return False
+    # Real listings live at /Business-Opportunity/<slug>/<numeric-id>/
+    if "business-opportunity" in h:
+        return True
+    # ...or carry a long numeric listing id somewhere in the link
+    if re.search(r"/\d{6,}", h):
+        return True
+    return False
 
 
 def extract_price(text: str) -> str:
@@ -187,6 +219,9 @@ def fetch_alert_emails() -> list:
                 continue
             msg = email.message_from_bytes(msg_data[0][1])
             subject = decode_str(msg.get("Subject"))
+            if any(s in subject.lower() for s in SKIP_SUBJECTS):
+                log.info(f"  Skipping non-listing email: {subject}")
+                continue
             log.info(f"  Reading email: {subject}")
             bodies.append(get_html_body(msg))
     else:
@@ -210,7 +245,7 @@ def parse_listings(html: str, today: str) -> list:
     for a in soup.find_all("a", href=True):
         href = a["href"].strip()
         all_links.append(href)
-        if "bizbuysell" not in href.lower():
+        if not is_listing_url(href):
             continue
 
         name = " ".join(a.get_text(" ", strip=True).split())
