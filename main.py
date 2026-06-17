@@ -32,23 +32,32 @@ API_URL = f"{SITE_URL}/api/manual-records"
 # ---------------------------------------------------------------------------
 
 def get_existing_keys() -> set:
-    resp = requests.get(API_URL, timeout=30)
-    resp.raise_for_status()
-    records = resp.json()
-    if isinstance(records, dict):
-        records = records.get("records", [])
-
-    keys: set = set()
-    for r in records:
-        url = (r.get("research_url") or "").strip().lower()
-        if url:
-            keys.add(url)
-        else:
-            name = (r.get("name") or "").strip().lower()
-            state = (r.get("state") or "").strip().lower()
-            if name:
-                keys.add(f"{name}|{state}")
-    return keys
+    # Render free tier sleeps — retry up to 3 times with a long timeout
+    for attempt in range(1, 4):
+        try:
+            log.info(f"Fetching existing listings (attempt {attempt})...")
+            resp = requests.get(API_URL, timeout=90)
+            resp.raise_for_status()
+            records = resp.json()
+            if isinstance(records, dict):
+                records = records.get("records", [])
+            keys: set = set()
+            for r in records:
+                url = (r.get("research_url") or "").strip().lower()
+                if url:
+                    keys.add(url)
+                else:
+                    name = (r.get("name") or "").strip().lower()
+                    state = (r.get("state") or "").strip().lower()
+                    if name:
+                        keys.add(f"{name}|{state}")
+            return keys
+        except Exception as e:
+            log.warning(f"Attempt {attempt} failed: {e}")
+            if attempt < 3:
+                log.info("Waiting 30s for site to wake up...")
+                time.sleep(30)
+    raise RuntimeError("Site did not respond after 3 attempts")
 
 
 def add_listing(listing: dict) -> dict:
