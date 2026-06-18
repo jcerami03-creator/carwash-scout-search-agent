@@ -2,7 +2,12 @@ name: Daily Car Wash Email Check
 
 on:
   schedule:
-    - cron: "0 0 * * *"
+    # GitHub's scheduler is best-effort and heavily delays jobs at the top of
+    # the hour, so we fire a few times just after 8 PM ET. The site dedups by
+    # listing id, so running more than once is always harmless.
+    - cron: "7 0 * * *"
+    - cron: "22 0 * * *"
+    - cron: "37 0 * * *"
   workflow_dispatch:
 
 jobs:
