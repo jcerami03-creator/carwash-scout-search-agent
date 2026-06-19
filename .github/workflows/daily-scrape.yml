@@ -2,12 +2,16 @@ name: Daily Car Wash Email Check
 
 on:
   schedule:
-    # 3 PM ET = 19:00 UTC -- well off GitHub's congested midnight-UTC window,
-    # so scheduled runs fire far more reliably here. A few times for safety;
-    # the site dedups by listing id, so extra runs are always harmless.
-    - cron: "7 19 * * *"
-    - cron: "22 19 * * *"
-    - cron: "37 19 * * *"
+    # GitHub's free scheduler frequently drops scheduled runs, so we fire many
+    # times across the 3-5 PM ET window (19:00-21:00 UTC, off-peak, odd minutes)
+    # to maximize the chance at least one gets through. The site dedups by
+    # listing id, so running several times a day is always harmless.
+    - cron: "7 19 * * *"    # 3:07 PM ET
+    - cron: "23 19 * * *"   # 3:23 PM ET
+    - cron: "41 19 * * *"   # 3:41 PM ET
+    - cron: "13 20 * * *"   # 4:13 PM ET
+    - cron: "33 20 * * *"   # 4:33 PM ET
+    - cron: "53 20 * * *"   # 4:53 PM ET
   workflow_dispatch:
 
 jobs:
