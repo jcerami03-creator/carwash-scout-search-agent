@@ -38,8 +38,10 @@ AUTH = (os.environ.get("SCOUT_USER", "shullman"), os.environ.get("SCOUT_PASS", "
 # --- Gmail config ---
 GMAIL_USER = os.environ["GMAIL_USER"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
-# Sender to look for (substring match). BizBuySell alerts come from bizbuysell.com
+# Senders to look for (substring match). BizBuySell alerts come from bizbuysell.com;
+# Crexi alerts come from notifications.crexi.com
 BIZBUYSELL_FROM = os.environ.get("BIZBUYSELL_FROM", "bizbuysell")
+CREXI_FROM = os.environ.get("CREXI_FROM", "crexi")
 # How many days of emails to scan each run (2 = small overlap so nothing slips)
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 
@@ -256,30 +258,32 @@ def fetch_alert_emails() -> list:
     mail.select("INBOX")
 
     since = (datetime.utcnow() - timedelta(days=LOOKBACK_DAYS)).strftime("%d-%b-%Y")
-    criteria = f'(SINCE "{since}" FROM "{BIZBUYSELL_FROM}")'
+    # Match emails from EITHER BizBuySell or Crexi
+    criteria = f'(SINCE "{since}" OR FROM "{BIZBUYSELL_FROM}" FROM "{CREXI_FROM}")'
     log.info(f"Searching emails: {criteria}")
     status, data = mail.search(None, criteria)
 
-    bodies = []
+    emails_out = []  # list of (sender, html_body)
     if status == "OK" and data and data[0]:
         ids = data[0].split()
-        log.info(f"Found {len(ids)} BizBuySell email(s) in the last {LOOKBACK_DAYS} days")
+        log.info(f"Found {len(ids)} listing email(s) in the last {LOOKBACK_DAYS} days")
         for eid in ids:
             st, msg_data = mail.fetch(eid, "(RFC822)")
             if st != "OK":
                 continue
             msg = email.message_from_bytes(msg_data[0][1])
             subject = decode_str(msg.get("Subject"))
+            sender = decode_str(msg.get("From")).lower()
             if any(s in subject.lower() for s in SKIP_SUBJECTS):
                 log.info(f"  Skipping non-listing email: {subject}")
                 continue
-            log.info(f"  Reading email: {subject}")
-            bodies.append(get_html_body(msg))
+            log.info(f"  Reading email ({'Crexi' if 'crexi' in sender else 'BizBuySell'}): {subject}")
+            emails_out.append((sender, get_html_body(msg)))
     else:
-        log.warning("No BizBuySell emails found in the search window.")
+        log.warning("No BizBuySell/Crexi emails found in the search window.")
 
     mail.logout()
-    return bodies
+    return emails_out
 
 
 # ---------------------------------------------------------------------------
@@ -377,6 +381,75 @@ def parse_listings(html: str, today: str) -> list:
     return listings
 
 
+def parse_crexi(html: str, today: str) -> list:
+    """Extract a car wash listing from a Crexi email.
+
+    Crexi's format is field-labelled text ("Asking Price $X", "Sub Type Car Wash",
+    "Year Built 2019", etc.) rather than per-listing cards, and its links are
+    click-tracking redirects, so we parse by labels and dedup by name.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    full = " ".join(soup.get_text(" ", strip=True).split())
+
+    if "car wash" not in full.lower():
+        log.info("  Crexi email: not a car wash, skipping")
+        return []
+
+    # Listing name sits between "View Listing Page" and "Offering Memorandum"/"Property Details"
+    name = ""
+    m = re.search(r"View Listing Page\s+(.+?)\s+(?:Offering Memorandum|Property Details)", full)
+    if m:
+        name = m.group(1).strip()
+    if not name or len(name) < 3:
+        log.warning("  Crexi email: could not isolate listing name")
+        log.warning(f"  Snippet: {full[:400]}")
+        return []
+
+    def field(label, pattern):
+        m = re.search(label + r"\s*(" + pattern + r")", full)
+        return m.group(1).strip() if m else ""
+
+    asking = field(r"Asking Price", r"\$[\d,]+")
+    noi = field(r"NOI", r"\$[\d,]+")
+    year = field(r"Year Built", r"\d{4}")
+    acres = field(r"Lot Size \(acres\)", r"[\d.]+")
+
+    loc_m = re.search(r"([A-Z][A-Za-z .]+,\s*[A-Z]{2})\b", full)
+    location = loc_m.group(1).strip() if loc_m else ""
+    addr_m = re.search(r"\d{2,6}\s+[A-Za-z0-9 .]+?(?:St|Ave|Blvd|Rd|Dr|Hwy|Pkwy|Ln|Way|Road|Street|Drive)\b", full)
+    addr = addr_m.group(0).strip() if addr_m else ""
+    market = ", ".join(p for p in [addr, location] if p)
+    state = parse_state(location)
+
+    research = ""
+    for a in soup.find_all("a", href=True):
+        txt = a.get_text(" ", strip=True).lower()
+        if "view listing" in txt or "listing page" in txt or "offering memorandum" in txt:
+            research = a["href"].strip()
+            break
+    if not research:  # fall back to any Crexi link
+        for a in soup.find_all("a", href=True):
+            if "crexi" in a["href"].lower():
+                research = a["href"].strip()
+                break
+
+    listing = {
+        "name": name,
+        "market": market,
+        "state": state,
+        "asking_price": asking,
+        "ebitda": noi,
+        "year": year,
+        "acres": acres,
+        "research_url": research,
+        "source": "Crexi Email Alert",
+        "note": (f"From Crexi: {name}. " + (f"NOI {noi}. " if noi else "") +
+                 f"Auto-imported from Crexi email on {today}.").strip(),
+    }
+    log.info(f"  Crexi listing: {name} | {market} | {asking}")
+    return [listing]
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -388,16 +461,17 @@ def main():
     existing = get_existing_keys()
     log.info(f"{len(existing)} listings already on the site")
 
-    bodies = fetch_alert_emails()
-    if not bodies:
+    emails = fetch_alert_emails()
+    if not emails:
         log.info("Nothing to do - no alert emails. Done.")
         return
 
-    # Parse every email, collect unique new listings
+    # Parse every email with the right parser, collect unique new listings
     new_listings = []
     seen = set(existing)
-    for html in bodies:
-        for listing in parse_listings(html, today):
+    for sender, html in emails:
+        parsed = parse_crexi(html, today) if "crexi" in sender else parse_listings(html, today)
+        for listing in parsed:
             key = dedup_key_for(listing)
             if key in seen:
                 log.info(f"  - Already have: {listing['name']}")
