@@ -81,10 +81,7 @@ def get_existing_keys() -> set:
                 records = records.get("records", [])
             keys = set()
             for r in records:
-                keys.add(listing_key(r.get("name", ""), r.get("state", "")))
-                lid = extract_listing_id(r.get("research_url", ""))
-                if lid:
-                    keys.add(f"bbs-{lid}")
+                keys |= keys_for(r)
             return keys
         except Exception as e:
             log.warning(f"Attempt {attempt} failed: {e}")
@@ -163,18 +160,22 @@ def maps_url(location: str) -> str:
     return "https://www.google.com/maps/search/" + requests.utils.quote(location)
 
 
-def dedup_key_for(listing: dict) -> str:
-    """Prefer the stable BizBuySell listing id; fall back to name|state.
+def keys_for(listing: dict) -> set:
+    """All dedup keys that identify a listing.
 
-    Only BizBuySell URLs carry a stable ?q= id. Crexi links are per-email
-    click-tracking redirects, so Crexi listings always dedup by name|state.
+    A listing counts as a duplicate if ANY of these keys already exists. We
+    always include name|state, and additionally the BizBuySell id when present -
+    so the same wash relisted by BizBuySell under a NEW ?q= id is still caught
+    by its name|state key (and an unchanged id is caught by the id key). Crexi
+    links are per-email click-tracking redirects, so Crexi is name|state only.
     """
+    keys = {listing_key(listing.get("name", ""), listing.get("state", ""))}
     url = listing.get("research_url", "")
     if "bizbuysell" in url.lower():
         lid = extract_listing_id(url)
         if lid:
-            return f"bbs-{lid}"
-    return listing_key(listing.get("name", ""), listing.get("state", ""))
+            keys.add(f"bbs-{lid}")
+    return keys
 
 
 def looks_like_location(text: str) -> bool:
@@ -555,11 +556,11 @@ def main():
     for sender, html in emails:
         parsed = parse_crexi(html, today) if "crexi" in sender else parse_listings(html, today)
         for listing in parsed:
-            key = dedup_key_for(listing)
-            if key in seen:
+            keys = keys_for(listing)
+            if keys & seen:
                 log.info(f"  - Already have: {listing['name']}")
                 continue
-            seen.add(key)
+            seen |= keys
             new_listings.append(listing)
             log.info(f"  + New: {listing['name']} - {listing.get('market', '')} {listing.get('asking_price', '')}")
 
