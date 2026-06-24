@@ -164,10 +164,16 @@ def maps_url(location: str) -> str:
 
 
 def dedup_key_for(listing: dict) -> str:
-    """Prefer the stable listing id; fall back to name|state."""
-    lid = extract_listing_id(listing.get("research_url", ""))
-    if lid:
-        return f"bbs-{lid}"
+    """Prefer the stable BizBuySell listing id; fall back to name|state.
+
+    Only BizBuySell URLs carry a stable ?q= id. Crexi links are per-email
+    click-tracking redirects, so Crexi listings always dedup by name|state.
+    """
+    url = listing.get("research_url", "")
+    if "bizbuysell" in url.lower():
+        lid = extract_listing_id(url)
+        if lid:
+            return f"bbs-{lid}"
     return listing_key(listing.get("name", ""), listing.get("state", ""))
 
 
@@ -381,12 +387,13 @@ def parse_listings(html: str, today: str) -> list:
     return listings
 
 
-def parse_crexi(html: str, today: str) -> list:
-    """Extract a car wash listing from a Crexi email.
+def parse_crexi_share(html: str, today: str) -> list:
+    """Extract a single car wash listing from a Crexi "share this listing" email.
 
-    Crexi's format is field-labelled text ("Asking Price $X", "Sub Type Car Wash",
-    "Year Built 2019", etc.) rather than per-listing cards, and its links are
-    click-tracking redirects, so we parse by labels and dedup by name.
+    These (from emails@notifications.crexi.com) are field-labelled text for ONE
+    listing ("Asking Price $X", "Sub Type Car Wash", "Year Built 2019", etc.)
+    with click-tracking redirect links, so we parse by labels and dedup by name.
+    Saved-search alert emails use a different layout - see parse_crexi_alert.
     """
     soup = BeautifulSoup(html, "html.parser")
     full = " ".join(soup.get_text(" ", strip=True).split())
@@ -448,6 +455,82 @@ def parse_crexi(html: str, today: str) -> list:
     }
     log.info(f"  Crexi listing: {name} | {market} | {asking}")
     return [listing]
+
+
+def parse_crexi_alert(html: str, today: str) -> list:
+    """Extract car wash listings from a Crexi saved-search ALERT email.
+
+    These (from emails@search.crexi.com) say "N properties were added to Crexi
+    matching <search>" and bundle MANY listings, each as a card: a name link,
+    a "City, ST" line, then a "Type | SqFt" (or "Description: ...") line and a
+    "View Property" button. Even a "Car Washes" search returns some non-car-wash
+    hits (land, pads, gas stations), so we keep only listings whose name or type
+    mentions "wash".
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    listings = []
+    seen_local = set()
+
+    # Each listing's name is a <p class="h2"> wrapping an <a href=...>; the
+    # location and property-type lines are the <p> siblings right after it.
+    for h2 in soup.find_all("p", class_="h2"):
+        a = h2.find("a", href=True)
+        if not a:
+            continue
+        name = " ".join(a.get_text(" ", strip=True).split())
+        if not name or len(name) < 3:
+            continue
+        href = a["href"].strip()
+
+        sib_text = [
+            " ".join(p.get_text(" ", strip=True).split())
+            for p in h2.find_next_siblings("p")
+        ]
+        location_line = sib_text[0] if len(sib_text) >= 1 else ""
+        type_line = sib_text[1] if len(sib_text) >= 2 else ""
+
+        # Car washes only - the saved search also returns land/pads/gas stations.
+        if "wash" not in (name + " " + type_line).lower():
+            log.info(f"  Skipping Crexi (not a car wash): {name}")
+            continue
+
+        loc = location_line.strip()
+        state = parse_state(loc) or parse_state(type_line)
+
+        key = listing_key(name, state)
+        if key in seen_local:
+            continue
+        seen_local.add(key)
+
+        note = ("From Crexi: " + name + "." +
+                (" " + type_line + "." if type_line else "") +
+                f" Auto-imported from Crexi saved-search alert on {today}.")
+        listings.append({
+            "name": name,
+            "market": loc,
+            "state": state,
+            "research_url": href,
+            "maps_url": maps_url(loc) if loc else "",
+            "source": "Crexi Email Alert",
+            "note": note.strip(),
+        })
+        log.info(f"  Crexi alert listing: {name} | {loc}")
+
+    if not listings:
+        log.info("  Crexi alert: no car wash listings in this email")
+    return listings
+
+
+def parse_crexi(html: str, today: str) -> list:
+    """Route a Crexi email to the right parser.
+
+    Saved-search ALERT emails bundle many listing cards; "share this listing"
+    emails are a single field-labelled listing. Detect the alert format (it says
+    "added to Crexi") and parse accordingly, else use the single-listing parser.
+    """
+    if "added to crexi" in html.lower() or 'class="h2"' in html:
+        return parse_crexi_alert(html, today)
+    return parse_crexi_share(html, today)
 
 
 # ---------------------------------------------------------------------------
