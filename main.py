@@ -45,6 +45,13 @@ CREXI_FROM = os.environ.get("CREXI_FROM", "crexi")
 # How many days of emails to scan each run (2 = small overlap so nothing slips)
 LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "2"))
 
+# Crexi's open data API returns a listing's full details (price/NOI/cap/year/
+# acres/address/lease) as JSON from a plain server-side GET - no browser, no
+# login. The alert email only has the summary card, so we use this to enrich.
+CREXI_API_BASE = "https://api.crexi.com/assets/"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/126.0 Safari/537.36")
+
 # Subjects that are account/welcome emails, NOT listing alerts - skip these
 SKIP_SUBJECTS = (
     "thank you", "registering", "register", "welcome", "verify", "confirm your",
@@ -176,6 +183,102 @@ def keys_for(listing: dict) -> set:
         if lid:
             keys.add(f"bbs-{lid}")
     return keys
+
+
+# ---------------------------------------------------------------------------
+# Crexi listing-detail enrichment (via Crexi's open data API)
+# ---------------------------------------------------------------------------
+
+def crexi_asset_id(listing: dict) -> str:
+    """Resolve a Crexi asset id for a listing.
+
+    The id is the numeric segment in the public listing URL and in image URLs
+    (images.crexi.com/assets/<id>). Crexi email links are click-tracking
+    redirects, so we follow the redirect to /properties/<id> to read the id.
+    """
+    url = listing.get("research_url", "") or ""
+    m = re.search(r"crexi\.com/assets/(\d+)", url)
+    if m:
+        return m.group(1)
+    if "crexi.com" in url:
+        try:
+            r = requests.get(url, headers={"User-Agent": BROWSER_UA},
+                             timeout=20, allow_redirects=True)
+            m = re.search(r"/properties/(\d+)", r.url)
+            if m:
+                return m.group(1)
+        except Exception as e:
+            log.warning(f"  Crexi id resolve failed: {e}")
+    return ""
+
+
+def fetch_crexi_asset(asset_id: str) -> dict:
+    """Fetch a listing's full detail JSON from Crexi's open data API."""
+    try:
+        r = requests.get(CREXI_API_BASE + asset_id,
+                         headers={"User-Agent": BROWSER_UA, "Accept": "application/json"},
+                         timeout=25)
+        if r.status_code == 200:
+            return r.json()
+        log.warning(f"  Crexi API {asset_id}: HTTP {r.status_code}")
+    except Exception as e:
+        log.warning(f"  Crexi API fetch failed for {asset_id}: {e}")
+    return {}
+
+
+def enrich_crexi_listing(listing: dict, today: str) -> bool:
+    """Fill price/NOI/cap/year/acres/address/lease from Crexi's data API.
+
+    Mutates the listing in place. Only sets a field when Crexi has a real value
+    (so a missing price on a land/unpriced deal just stays blank). Safe to fail:
+    on any error the listing simply keeps its basic email data.
+    """
+    asset_id = crexi_asset_id(listing)
+    if not asset_id:
+        return False
+    asset = fetch_crexi_asset(asset_id)
+    if not asset:
+        return False
+    det = asset.get("details") or {}
+    locs = asset.get("locations") or []
+    loc = locs[0] if locs else {}
+
+    if det.get("Asking Price"):
+        listing["asking_price"] = det["Asking Price"]
+    if det.get("NOI"):
+        listing["ebitda"] = det["NOI"]
+    if det.get("Year Built"):
+        listing["year"] = det["Year Built"]
+    if det.get("Lot Size (acres)"):
+        listing["acres"] = det["Lot Size (acres)"]
+
+    addr = (loc.get("address") or "").strip()
+    city = (loc.get("city") or "").strip()
+    zipc = (loc.get("zip") or "").strip()
+    st = listing.get("state", "")
+    if addr:
+        tail = " ".join(p for p in [f"{city}," if city else "", st, zipc] if p).strip().strip(",")
+        listing["market"] = (f"{addr}, {tail}").strip().strip(",")
+        listing["maps_url"] = maps_url(listing["market"])
+
+    listing["website"] = f"https://www.crexi.com/properties/{asset_id}"
+
+    parts = []
+    for label in ("Asking Price", "Cap Rate", "NOI", "Year Built", "Lot Size (acres)",
+                  "Square Footage", "Lease Type", "Tenancy", "Remaining Term",
+                  "Lease Expiration", "Rent Bumps"):
+        if det.get(label):
+            parts.append(f"{label}: {det[label]}")
+    listing["note"] = (f"Confirmed via Crexi: {listing.get('market') or listing.get('name', '')}. "
+                       + "; ".join(parts)
+                       + f". Auto-enriched from Crexi listing {asset_id} on {today}.").strip()
+    desc = asset.get("marketingDescription") or ""
+    if desc:
+        desc = " ".join(BeautifulSoup(desc, "html.parser").get_text(" ", strip=True).split())
+        if desc:
+            listing["full_text"] = desc[:4000]
+    log.info(f"  Crexi-enriched {asset_id}: {listing.get('asking_price') or '(no price)'} | {listing.get('market', '')}")
+    return True
 
 
 def looks_like_location(text: str) -> bool:
@@ -568,6 +671,11 @@ def main():
     added, failed = 0, 0
     for listing in new_listings:
         try:
+            if "crexi" in (listing.get("source", "") or "").lower():
+                try:
+                    enrich_crexi_listing(listing, today)
+                except Exception as e:
+                    log.warning(f"  Crexi enrich error (keeping basic data): {e}")
             add_listing(listing)
             log.info(f"Added: {listing['name']}")
             added += 1
